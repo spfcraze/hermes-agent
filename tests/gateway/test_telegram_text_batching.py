@@ -159,3 +159,63 @@ class TestTextBatching:
         assert adapter._media_group_events == {}
         assert adapter._media_group_tasks == {}
         assert adapter._polling_error_task is None
+
+
+class TestFlushShieldedFromFollowupCancel:
+    """A follow-up chunk cancels the in-flight flush task; the already-popped
+    event must still be dispatched (shield), not silently lost."""
+
+    @pytest.mark.asyncio
+    async def test_text_flush_survives_followup_cancel(self):
+        adapter = _make_adapter()
+        handled = []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_handle(event):
+            entered.set()
+            await release.wait()
+            handled.append(event.text)
+            return True
+
+        adapter.handle_message = slow_handle
+
+        adapter._enqueue_text_event(_make_event("first part"))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        adapter._enqueue_text_event(_make_event("second part"))
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.sleep(0.3)
+
+        assert handled == ["first part", "second part"]
+
+    @pytest.mark.asyncio
+    async def test_photo_flush_survives_followup_cancel(self):
+        adapter = _make_adapter()
+        adapter._media_batch_delay_seconds = 0.05
+        handled = []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_handle(event):
+            entered.set()
+            await release.wait()
+            handled.append(event.media_urls[0])
+            return True
+
+        adapter.handle_message = slow_handle
+
+        def photo(url):
+            e = _make_event("")
+            e.media_urls = [url]
+            e.media_types = ["image"]
+            return e
+
+        adapter._enqueue_photo_event("photos", photo("/tmp/a.jpg"))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        adapter._enqueue_photo_event("photos", photo("/tmp/b.jpg"))
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.sleep(0.3)
+
+        assert handled == ["/tmp/a.jpg", "/tmp/b.jpg"]

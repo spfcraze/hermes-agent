@@ -8897,7 +8897,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[Telegram] Flushing text batch %s (%d chars)",
                 key, len(event.text or ""),
             )
-            await self.handle_message(event)
+            # Shield the downstream dispatch: _enqueue_text_event cancels
+            # this flush task when a follow-up chunk lands, and the event is
+            # already popped — an unshielded CancelledError would lose it
+            # silently (same class Discord fixed with a shield + comment).
+            await asyncio.shield(self.handle_message(event))
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:
                 self._pending_text_batch_tasks.pop(key, None)
@@ -8931,7 +8935,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.debug("[Telegram] Dropping photo batch flush after disconnect started")
                 return
             logger.info("[Telegram] Flushing photo batch %s with %d image(s)", batch_key, len(event.media_urls))
-            await self.handle_message(event)
+            # Shield the downstream dispatch: _enqueue_photo_event cancels
+            # this flush task when a follow-up photo lands, and the event is
+            # already popped — an unshielded CancelledError would lose it
+            # silently (same class Discord fixed with a shield + comment).
+            await asyncio.shield(self.handle_message(event))
         finally:
             if self._pending_photo_batch_tasks.get(batch_key) is current_task:
                 self._pending_photo_batch_tasks.pop(batch_key, None)
