@@ -80,7 +80,13 @@ class Watermark:
         batch (so save() persists the full new watermark).  On first run,
         records every id but returns an empty list (baseline, no replay).
         """
-        existing = set(str(x) for x in self._data.get("seen_ids", []))
+        # Preserve stored insertion order (oldest first) for bounded eviction:
+        # a `set` orders by string hash, randomized per-process by
+        # PYTHONHASHSEED, which made `combined[-max_seen:]` evict an arbitrary
+        # (and rerun-variable) slice once the watermark hit the cap. We keep a
+        # list for ordering and a set only for O(1) membership.
+        stored = [str(x) for x in self._data.get("seen_ids", [])]
+        existing = set(stored)
         was_first_run = self.is_first_run
 
         new_items: List[Dict[str, Any]] = []
@@ -97,7 +103,7 @@ class Watermark:
                 continue  # record but don't emit
             new_items.append(item)
 
-        combined = list(existing) + [i for i in batch_ids if i not in existing]
+        combined = stored + [i for i in batch_ids if i not in existing]
         if len(combined) > self.max_seen:
             combined = combined[-self.max_seen:]
         self._data["seen_ids"] = combined
