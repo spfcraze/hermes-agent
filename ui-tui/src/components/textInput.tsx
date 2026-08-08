@@ -13,6 +13,7 @@ import {
   isVoiceToggleKey,
   type ParsedVoiceRecordKey
 } from '../lib/platform.js'
+import { stripTerminalControlFragments } from '../lib/terminalInputSanitize.js'
 import { isTermuxTuiMode } from '../lib/termux.js'
 
 type InkExt = typeof Ink & {
@@ -1013,7 +1014,7 @@ export function TextInput({
   const ins = (v: string, c: number, s: string) => v.slice(0, c) + s + v.slice(c)
 
   const pastePlainText = (text: string) => {
-    const cleaned = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const cleaned = stripTerminalControlFragments(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
 
     if (!cleaned) {
       return
@@ -1105,6 +1106,13 @@ export function TextInput({
 
         return
       }
+
+      // Control traffic (SGR mouse reports, CPR/DECRPM/DA1 responses) must
+      // never become composer text. The hermes-ink parser routes complete
+      // sequences away from the keypress path, but a torn fragment or an
+      // older gateway can still deliver the raw payload — scrub it here so
+      // returning to the terminal and scrolling can never flood the input.
+      inp = stripTerminalControlFragments(inp)
 
       if (
         eventRaw === '\x1bv' ||

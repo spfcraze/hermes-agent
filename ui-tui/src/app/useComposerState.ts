@@ -16,6 +16,8 @@ import { useQueue } from '../hooks/useQueue.js'
 import { isUsableClipboardText, readClipboardText } from '../lib/clipboard.js'
 import { resolveEditor } from '../lib/editor.js'
 import { readOsc52Clipboard } from '../lib/osc52.js'
+import { shouldCollapsePaste } from '../lib/pasteCollapse.js'
+import { stripTerminalControlFragments } from '../lib/terminalInputSanitize.js'
 import { isRemoteShellSession } from '../lib/terminalSetup.js'
 import { pasteTokenLabel, stripTrailingPasteNewlines } from '../lib/text.js'
 
@@ -232,7 +234,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
 
   const handleResolvedPaste = useCallback(
     async ({ bracketed, cursor, text, value }: Omit<PasteEvent, 'hotkey'>): Promise<ComposerPasteResult | null> => {
-      const cleanedText = stripTrailingPasteNewlines(text)
+      const cleanedText = stripTerminalControlFragments(stripTrailingPasteNewlines(text))
 
       if (!cleanedText || !/[^\n]/.test(cleanedText)) {
         return bracketed ? pasteClipboardImage(value, cursor, true) : null
@@ -275,10 +277,17 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
       const lineCount = cleanedText.split('\n').length
       const pasteCollapseLines = getUiState().pasteCollapseLines
       const pasteCollapseChars = getUiState().pasteCollapseChars
-      const linesHit = pasteCollapseLines > 0 && lineCount >= pasteCollapseLines
-      const charsHit = pasteCollapseChars > 0 && cleanedText.length >= pasteCollapseChars
+      const pasteCollapseDataChars = getUiState().pasteCollapseDataChars
 
-      if (!linesHit && !charsHit) {
+      const collapse = shouldCollapsePaste({
+        text: cleanedText,
+        lineCount,
+        linesThreshold: pasteCollapseLines,
+        charsThreshold: pasteCollapseChars,
+        dataCharsThreshold: pasteCollapseDataChars
+      })
+
+      if (!collapse) {
         return {
           cursor: cursor + cleanedText.length,
           value: value.slice(0, cursor) + cleanedText + value.slice(cursor)
