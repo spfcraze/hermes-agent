@@ -861,6 +861,17 @@ _EMPTY_TOOL_RESPONSE_NUDGE = (
     "results above and continue with the task."
 )
 
+# Re-prompt sent when a model returns no content and no reasoning at all.  A
+# bare retry is not deliberation: it resends the same request and gives the
+# model no new state.  This nudge deliberately asks for a compact state
+# transition so the next request is both different and actionable.
+_EMPTY_RESPONSE_DELIBERATION_NUDGE = (
+    "Your previous response contained no usable content. Deliberate from the "
+    "current state: briefly identify what has already been established, what "
+    "remains to do, and the next concrete action. Execute any needed tool call "
+    "now; otherwise provide the final answer."
+)
+
 
 # Shared recovery hint appended to every content-policy refusal message. Both
 # the HTTP-200 refusal path (``finish_reason=content_filter``) and the
@@ -7159,15 +7170,12 @@ def run_conversation(
                         agent._session_messages = messages
                         continue
 
-                    # ── Empty response retry ──────────────────────
-                    # Model returned nothing usable.  Retry up to 3
-                    # times before attempting fallback.  This covers
-                    # both truly empty responses (no content, no
-                    # reasoning) AND reasoning-only responses after
-                    # prefill exhaustion — models like mimo-v2-pro
-                    # always populate reasoning fields via OpenRouter,
-                    # so the old `not _has_structured` guard blocked
-                    # retries for every reasoning model after prefill.
+                    # ── Empty response recovery ───────────────────
+                    # Model returned nothing usable.  Never retry an
+                    # unchanged request: that resends the full prompt and
+                    # tool catalog without giving the model new state.
+                    # Structured reasoning already had its own prefill path;
+                    # only a truly empty response reaches this branch.
                     _truly_empty = not agent._strip_think_blocks(
                         final_response
                     ).strip()
@@ -7175,49 +7183,31 @@ def run_conversation(
                         _has_structured
                         and agent._thinking_prefill_retries >= 2
                     )
-                    if _truly_empty and (not _has_structured or _prefill_exhausted) and agent._empty_content_retries < 3:
+                    if _truly_empty and (not _has_structured or _prefill_exhausted) and agent._empty_content_retries < 1:
                         agent._empty_content_retries += 1
-                        wait_time = jittered_backoff(
-                            agent._empty_content_retries,
-                            base_delay=5.0,
-                            max_delay=60.0,
-                        )
                         logger.warning(
                             "Empty response (no content or reasoning) — "
-                            "retry %d/3 in %.1fs (model=%s)",
-                            agent._empty_content_retries, wait_time, agent.model,
+                            "sending one deliberative recovery nudge (model=%s)",
+                            agent.model,
                         )
                         agent._buffer_status(
-                            f"⚠️ Empty response from model — retrying "
-                            f"({agent._empty_content_retries}/3) in {wait_time:.0f}s"
+                            "⚠️ Empty response from model — requesting state-aware continuation"
                         )
-                        # Sleep in small increments to stay responsive to interrupts
-                        sleep_end = time.time() + wait_time
-                        _backoff_touch_counter = 0
-                        while time.time() < sleep_end:
-                            if agent._interrupt_requested:
-                                agent._vprint(f"{agent.log_prefix}⚡ Interrupt detected during empty-response retry wait, aborting.", force=True)
-                                _interrupt_text = (
-                                    f"Operation interrupted: retrying empty response from model "
-                                    f"(retry {agent._empty_content_retries}/3)."
-                                )
-                                close_interrupted_tool_sequence(messages, _interrupt_text)
-                                agent._persist_session(messages, conversation_history)
-                                agent.clear_interrupt()
-                                return {
-                                    "final_response": _interrupt_text,
-                                    "messages": messages,
-                                    "api_calls": api_call_count,
-                                    "completed": False,
-                                    "interrupted": True,
-                                }
-                            time.sleep(0.2)
-                            _backoff_touch_counter += 1
-                            if _backoff_touch_counter % 150 == 0:  # 150 × 0.2s = 30s
-                                agent._touch_activity(
-                                    f"empty response retry backoff ({agent._empty_content_retries}/3), "
-                                    f"{int(sleep_end - time.time())}s remaining"
-                                )
+                        # Preserve role alternation and make the next request
+                        # materially different.  The nudge asks for state,
+                        # remaining work, and a concrete next action rather
+                        # than merely saying "continue".
+                        _empty_msg = agent._build_assistant_message(
+                            assistant_message, finish_reason
+                        )
+                        _empty_msg["content"] = "(empty)"
+                        _empty_msg["_empty_recovery_synthetic"] = True
+                        messages.append(_empty_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": _EMPTY_RESPONSE_DELIBERATION_NUDGE,
+                            "_empty_recovery_synthetic": True,
+                        })
                         continue
 
                     # ── Exhausted retries — try fallback provider ──
